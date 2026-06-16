@@ -1,0 +1,73 @@
+name: Mirror assets
+
+# Daily check for upstream resource updates. When a tracked project ships a new
+# release, its assets are downloaded, gzip-compressed (to stay under jsDelivr's
+# 50 MB per-file limit) and committed here, so they can be served via jsDelivr:
+#   https://cdn.jsdelivr.net/gh/Well2333/asset-mirror@main/<dir>/<file>.gz
+on:
+  schedule:
+    - cron: '17 3 * * *'   # daily at 03:17 UTC
+  workflow_dispatch: {}      # allow manual runs
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  cloudflared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror cloudflared (gzip) when a new release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The exact release assets the Unturned well404.WebPanel plugin downloads.
+          ASSETS=(
+            cloudflared-windows-amd64.exe
+            cloudflared-windows-386.exe
+            cloudflared-linux-amd64
+            cloudflared-linux-386
+            cloudflared-linux-arm64
+            cloudflared-linux-arm
+          )
+
+          latest="$(gh api repos/cloudflare/cloudflared/releases/latest --jq .tag_name)"
+          echo "Upstream latest cloudflared: $latest"
+
+          current=""
+          [ -f cloudflared/VERSION ] && current="$(cat cloudflared/VERSION)"
+          echo "Mirrored version: ${current:-<none>}"
+
+          if [ "$latest" = "$current" ]; then
+            echo "Already up to date — nothing to do."
+            exit 0
+          fi
+
+          mkdir -p cloudflared
+          for a in "${ASSETS[@]}"; do
+            echo "Downloading $a ($latest) ..."
+            curl -fSL --retry 3 --retry-delay 5 -o "/tmp/$a" \
+              "https://github.com/cloudflare/cloudflared/releases/download/$latest/$a"
+            gzip -9 -c "/tmp/$a" > "cloudflared/$a.gz"
+            ls -l "cloudflared/$a.gz"
+            rm -f "/tmp/$a"
+          done
+
+          echo "$latest" > cloudflared/VERSION
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cloudflared
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(cloudflared): mirror $latest"
+            git push
+          fi
